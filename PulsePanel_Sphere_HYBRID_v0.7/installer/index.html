@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="pl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#08121c">
+<title>PulsePanel Sphere — instalator</title>
+<style>
+:root{font:16px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif;color-scheme:dark}
+*{box-sizing:border-box}body{margin:0;background:#08121c;color:#e9f6fc}
+.wrap{width:min(920px,100%);margin:auto;padding:28px 20px 80px}
+.brand{display:flex;align-items:center;gap:15px;margin-bottom:42px}
+.brand svg{width:54px;height:54px;flex-shrink:0}
+.brand strong{font-size:22px;letter-spacing:-.6px}
+.strap{color:#84acbc;font-size:11px;letter-spacing:2px}
+.hero{display:grid;grid-template-columns:1.2fr 1fr;gap:45px;align-items:center}
+h1{font-size:clamp(30px,4vw,48px);line-height:1.15;margin:10px 0}
+p{color:#a7bfcd}h2{font-size:19px}
+.eyebrow{font-size:12px;letter-spacing:2px;color:#6ed7e9;font-weight:700}
+.sub{color:#b4d3df}
+.circle{width:min(100%,340px);aspect-ratio:1;border-radius:100%;border:12px solid #25313d;box-shadow:0 16px 40px #0009,inset 0 0 20px #000;display:grid;place-items:center;margin:auto;background:radial-gradient(circle at 42% 25%,#193044,#020609 65%)}
+.screen{width:100%;text-align:center}.screen .t{font-size:14px;letter-spacing:3px;color:#6ed7e9}.screen .clock{font-size:70px;font-weight:750;margin:12px 0}.screen .desc{font-size:13px;color:#8eb9c5}.orbit{border-radius:100%;width:85%;margin:22px auto 0;border:2px solid #2b5969}
+.step{display:flex;gap:15px;align-items:start;margin:20px 0}.num{border:1px solid #3f6c7e;border-radius:99px;width:32px;height:32px;display:grid;place-items:center;flex:0 0 32px;color:#72e5f6}
+.panel{background:#101d29;border:1px solid #28404e;border-radius:16px;padding:24px;margin-top:28px}
+button{background:#6ed7e9;color:#071621;border:0;border-radius:10px;padding:14px 23px;font-size:15px;font-weight:750;cursor:pointer}
+.status{font-size:14px;color:#b7d4e0;margin-top:15px}.bad{color:#f8bcaa}.ok{color:#a1e7c9}
+small{color:#8faab9}a{color:#81e2ef}
+@media(max-width:700px){.hero{grid-template-columns:1fr}.circle{max-width:260px}.screen .clock{font-size:53px}}
+</style>
+<script type="module" src="https://unpkg.com/esp-web-tools@10/dist/web/install-button.js?module"></script>
+</head>
+<body>
+<div class="wrap">
+  <header class="brand">
+    <svg viewBox="0 0 100 100" aria-label="PulsePanel"><rect x="0" y="0" width="100" height="100" rx="24" fill="#152936"/><path d="M9 55h19l9-19 13 36 13-51 11 34h16" fill="none" stroke="#73e3ef" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    <div><strong>Pulse<span style="color:#6ed7e9">Panel</span></strong><div class="strap">SPHERE / HYBRID 0.7</div></div>
+  </header>
+  <div class="hero">
+    <div><div class="eyebrow">INSTALACJA PRZEZ PRZEGLADARKE</div>
+      <h1>Twój BambuSphere.<br>Nowy, samodzielny system.</h1>
+      <p>Po instalacji firmware urządzenie obsługuje zegar, dotyk i opcjonalnie lokalne monitorowanie drukarki Bambu Lab. Dla statystyk PC potrzebny jest osobny, niewidoczny w tle moduł Windows; FPS wymaga zgodnego źródła danych, np. RTSS.</p>
+      <p><small>Wyłącznie Waveshare ESP32-S3-Touch-AMOLED-1.75 (okrągły ekran). Wersja prototypowa v0.7.</small></p>
+    </div>
+    <div class="circle"><div class="screen"><div class="t">PULSEPANEL</div><div class="orbit"></div><div class="clock">21:45</div><div class="desc">PC · BAMBU LAB · WIFI</div></div></div>
+  </div>
+  <section class="panel">
+    <h2>Instalator PRODUCENTA — przygotowanie urządzenia przed sprzedażą</h2>
+    <div class="step"><span class="num">1</span><div>Sprawdź płytkę: <b>okrągły Waveshare 1.75</b>, nie wersja 1.75C. Podłącz kablem USB-C do komputera.</div></div>
+    <div class="step"><span class="num">2</span><div>Użyj aktualnej przeglądarki <b>Chrome lub Edge</b>. Przed nadpisaniem firmware wykonaj kopię oryginalnej pamięci (instrukcja w README).</div></div>
+    <div class="step"><span class="num">3</span><div>Po wgraniu sprawdź dotyk, głośnik, zegar i kreator Wi-Fi. <b>Przed wysyłką usuń dane osobiste</b> przyciskiem RESET FABRYCZNY (dwa dotknięcia). Kupujący nie korzysta z tej strony instalatora.</div></div>
+    <div id="install"><p class="status" id="status">Sprawdzam dostępność skompilowanego firmware…</p></div>
+    <p><small>Instalacja nadpisze obecne oprogramowanie BambuSphere. Jeśli nie ma prawidłowego pliku .bin, przycisk nie zostanie pokazany.</small></p>
+  </section>
+</div>
+<script>
+(async()=>{
+ const area=document.getElementById('install'),status=document.getElementById('status');
+ if(!window.isSecureContext){status.className='status bad';status.textContent='Otwórz stronę przez HTTPS lub localhost (nie plik file://).';return;}
+ try{
+   const r=await fetch('./manifest.json',{cache:'no-store'});
+   if(!r.ok)throw new Error('Firmware nie zostało jeszcze zbudowane.');
+   const manifest=await r.json(),part=manifest?.builds?.[0]?.parts?.[0];
+   if(manifest?.builds?.[0]?.chipFamily!=='ESP32-S3'||part?.offset!==0)throw new Error('Niepoprawny manifest');
+   const file=await fetch('./'+part.path,{method:'HEAD',cache:'no-store'});
+   if(!file.ok || Number(file.headers.get('content-length'))<100000)throw new Error('Brak binarki do instalacji');
+   status.className='status ok';status.textContent='Firmware jest dostępne. Podłącz sprzęt przez USB i wybierz port.';
+   const button=document.createElement('esp-web-install-button');button.setAttribute('manifest','./manifest.json');
+   const inner=document.createElement('button');inner.slot='activate';inner.textContent='Zainstaluj PulsePanel Sphere';
+   button.appendChild(inner);area.appendChild(button);
+ }catch(e){status.className='status bad';status.textContent='Instalacja niedostępna: '+e.message+' Skompiluj firmware (patrz README_PL.md).';}
+})();
+</script>
+</body></html>

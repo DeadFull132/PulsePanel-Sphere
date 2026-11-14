@@ -1,0 +1,5 @@
+psutil>=5.9,<8
+nvidia-ml-py>=12.0
+# Optional for CPU temperature (when LibreHardwareMonitor is running):
+# wmi
+# pywin32
