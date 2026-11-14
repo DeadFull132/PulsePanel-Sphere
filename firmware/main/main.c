@@ -659,7 +659,7 @@ static void init_pairing_pin(void)
 static esp_err_t status_http(httpd_req_t *request)
 {
     if (!wifi_ready || setup) {
-        httpd_resp_send_err(request, HTTPD_503_SERVICE_UNAVAILABLE, "Wi-Fi offline");
+        httpd_resp_send_custom_err(request, "503 Service Unavailable", "Wi-Fi offline");
         return ESP_FAIL;
     }
     httpd_resp_set_type(request, "application/json");
@@ -689,7 +689,7 @@ static bool json_metric(const cJSON *root, const char *name, int *dst, int min, 
 static esp_err_t pc_metrics_http(httpd_req_t *request)
 {
     if (setup || !wifi_ready) {
-        httpd_resp_send_err(request, HTTPD_503_SERVICE_UNAVAILABLE, "Offline");
+        httpd_resp_send_custom_err(request, "503 Service Unavailable", "Offline");
         return ESP_FAIL;
     }
     int64_t now = esp_timer_get_time();

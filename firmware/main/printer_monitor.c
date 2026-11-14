@@ -14,6 +14,7 @@
 #include "nvs.h"
 #include "mqtt_client.h"
 #include "cJSON.h"
+#include "lwip/sockets.h"
 #include "lwip/inet.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/portmacro.h"
