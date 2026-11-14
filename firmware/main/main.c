@@ -51,7 +51,7 @@
 static const char *TAG = "PPSphere";
 static lv_obj_t *pages[PAGE_COUNT];
 static lv_obj_t *time_label, *date_label, *focus_label, *focus_state;
-static lv_obj_t *net_status, *net_ip, *net_setup, *net_extra;
+static lv_obj_t *net_status, *net_ip, *net_setup, *net_extra, *net_pair_value;
 static lv_obj_t *speaker_state;
 static lv_obj_t *print_status, *print_percent, *print_time, *print_temps, *print_layers, *print_file, *print_ams;
 static lv_obj_t *print_setup_url;
@@ -375,14 +375,20 @@ static void create_ui(void)
                           0x9dbbc8, &lv_font_montserrat_20);
     pill(pages[PAGE_SOUND], "TEST DZWIEKU", 0, 104, 270, 64, sound_press);
 
-    label(pages[PAGE_NETWORK], "USTAWIENIA SIECI", -108, 345, 0x97bcca, &lv_font_montserrat_20);
-    net_status = label(pages[PAGE_NETWORK], "Uruchamianie...", -36, 378, 0xe7f9fe, &lv_font_montserrat_28);
-    net_ip = label(pages[PAGE_NETWORK], "", 23, 380, 0x65deef, &lv_font_montserrat_20);
-    net_setup = label(pages[PAGE_NETWORK], "", 70, 390, 0xafc9d4, &lv_font_montserrat_20);
-    net_extra = label(pages[PAGE_NETWORK], "", 121, 385, 0x85a4b1, &lv_font_montserrat_20);
-    lv_obj_t *reset_wifi = pill(pages[PAGE_NETWORK], "ZMIEN WI-FI", 0, 144, 250, 55, reset_wifi_press);
+    /* FIX6: Keep the pairing PIN in its own large, unobstructed row.
+     * The old "KOD PC" line (y=121) overlapped the Wi-Fi button
+     * (centre y=144, height=55), which was painted later and hid the PIN.
+     * The new positions also respect the circular 466x466 display. */
+    label(pages[PAGE_NETWORK], "USTAWIENIA SIECI", -122, 345, 0x97bcca, &lv_font_montserrat_20);
+    net_status = label(pages[PAGE_NETWORK], "Uruchamianie...", -82, 364, 0xe7f9fe, &lv_font_montserrat_28);
+    net_ip = label(pages[PAGE_NETWORK], "", -43, 350, 0x65deef, &lv_font_montserrat_20);
+    net_setup = label(pages[PAGE_NETWORK], "", -10, 355, 0xafc9d4, &lv_font_montserrat_20);
+    net_extra = label(pages[PAGE_NETWORK], "KOD PAROWANIA PC", 33, 320, 0x97b5c3, &lv_font_montserrat_20);
+    net_pair_value = label(pages[PAGE_NETWORK], "--------", 81, 350, 0xeaffff, &lv_font_montserrat_48);
+    lv_obj_set_style_text_letter_space(net_pair_value, 2, 0);
+    lv_obj_t *reset_wifi = pill(pages[PAGE_NETWORK], "ZMIEN WI-FI", 0, 144, 210, 42, reset_wifi_press);
     wifi_reset_button_label = lv_obj_get_child(reset_wifi, 0);
-    lv_obj_t *reset_all = pill(pages[PAGE_NETWORK], "RESET FABRYCZNY", 0, 203, 260, 48, factory_reset_press);
+    lv_obj_t *reset_all = pill(pages[PAGE_NETWORK], "RESET FABRYCZNY", 0, 191, 196, 32, factory_reset_press);
     factory_reset_button_label = lv_obj_get_child(reset_all, 0);
     label(pages[PAGE_PRINTER], "BAMBU LAB / DRUKARKA", -125, 380, 0x90b8c5, &lv_font_montserrat_20);
     print_status = label(pages[PAGE_PRINTER], "NIE SKONFIGUROWANO", -91, 370, 0xb6dbe6, &lv_font_montserrat_20);
@@ -425,10 +431,15 @@ static void network_text(const char *status, const char *line1, const char *line
         lv_label_set_text(net_status, status);
         lv_label_set_text(net_ip, line1);
         lv_label_set_text(net_setup, line2);
-        char extra[80];
-        if (setup) snprintf(extra, sizeof(extra), "Strona: 192.168.4.1");
-        else snprintf(extra, sizeof(extra), "KOD PC: %s", pairing_pin);
-        lv_label_set_text(net_extra, extra);
+        if (setup) {
+            lv_label_set_text(net_extra, "OTWORZ W TELEFONIE");
+            lv_obj_set_style_text_font(net_pair_value, &lv_font_montserrat_28, 0);
+            lv_label_set_text(net_pair_value, "192.168.4.1");
+        } else {
+            lv_label_set_text(net_extra, "KOD PAROWANIA PC");
+            lv_obj_set_style_text_font(net_pair_value, &lv_font_montserrat_48, 0);
+            lv_label_set_text(net_pair_value, pairing_pin[0] ? pairing_pin : "--------");
+        }
         bsp_display_unlock();
     }
 }
