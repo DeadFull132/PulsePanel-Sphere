@@ -11,3 +11,9 @@ CONFIG_LV_FONT_MONTSERRAT_48=y
 # FIX3: wlasna tablica partycji - factory app 4 MiB, flash 16 MiB
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# FIX8: reserve internal DMA-capable RAM for SPI display transfers.
+# Move general allocations over 1 KiB to PSRAM when possible.
+CONFIG_SPIRAM_USE_MALLOC=y
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=1024
+CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=65536

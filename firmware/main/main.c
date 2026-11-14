@@ -5,6 +5,7 @@
  * PC telemetry is optional, NOT available from Wi-Fi alone.
  */
 #include <stdio.h>
+#include <stdarg.h>
 #include <string.h>
 #include <stdlib.h>
 #include <stdbool.h>
@@ -33,6 +34,7 @@
 #include "lwip/sockets.h"
 #include "lwip/inet.h"
 #include "esp_timer.h"
+#include "esp_heap_caps.h"
 #include "printer_monitor.h"
 
 #define PAGE_CLOCK 0
@@ -100,6 +102,26 @@ static lv_obj_t *label(lv_obj_t *parent, const char *value, int y, int width,
     lv_obj_set_style_text_font(l, font, 0);
     lv_obj_align(l, LV_ALIGN_CENTER, 0, y);
     return l;
+}
+
+/* FIX8: LVGL labels should only be invalidated if text really changes.
+ * Every old screen used to rewrite every label once per second, even while
+ * hidden. On this PSRAM-backed SPI AMOLED that generates avoidable flushes. */
+static void pp_label_set_text_if_changed(lv_obj_t *obj, const char *value)
+{
+    if (!obj || !value) return;
+    const char *old = lv_label_get_text(obj);
+    if (!old || strcmp(old, value) != 0) lv_label_set_text(obj, value);
+}
+
+static void pp_label_set_text_fmt_if_changed(lv_obj_t *obj, const char *fmt, ...)
+{
+    char out[160];
+    va_list args;
+    va_start(args, fmt);
+    int count = vsnprintf(out, sizeof(out), fmt, args);
+    va_end(args);
+    if (count >= 0) pp_label_set_text_if_changed(obj, out);
 }
 
 static bool is_main_page(int dest)
@@ -1061,9 +1083,20 @@ void app_main(void)
         ESP_LOGW(TAG, "Captive DNS task creation failed");
     if (xTaskCreate(discovery_task, "pp_udp", 4096, NULL, 3, NULL) != pdPASS)
         ESP_LOGW(TAG, "Discovery task creation failed");
+    unsigned int memory_log_ticks = 0;
     while (true) {
         vTaskDelay(pdMS_TO_TICKS(1000));
         printer_monitor_poll();
+        if (++memory_log_ticks >= 15) {
+            memory_log_ticks = 0;
+            const size_t dma_free = heap_caps_get_free_size(MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
+            const size_t dma_max = heap_caps_get_largest_free_block(MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
+            const size_t psram_free = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+            ESP_LOGI(TAG, "FIX8 RAM: DMA free=%u largest=%u, PSRAM free=%u",
+                     (unsigned)dma_free, (unsigned)dma_max, (unsigned)psram_free);
+            if (dma_max < 32768)
+                ESP_LOGW(TAG, "FIX8: low contiguous DMA memory; display may stall");
+        }
         time_t now;
         time(&now);
         struct tm tm;
@@ -1081,71 +1114,79 @@ void app_main(void)
             }
         }
         if (bsp_display_lock(400) == ESP_OK) {
-            lv_label_set_text(time_label, hour);
-            lv_label_set_text(date_label, date);
-            lv_label_set_text_fmt(focus_label, "%02d:%02d", focus_left / 60, focus_left % 60);
-            if (!focus_left) {
-                lv_label_set_text(focus_state, "KONIEC SESJI");
-                lv_label_set_text(focus_button_text, "OD NOWA");
+            /* Only update visible LVGL objects. Other pages refresh on first
+             * visible tick, avoiding unnecessary draw buffer pressure. */
+            if (page == PAGE_CLOCK) {
+                pp_label_set_text_if_changed(time_label, hour);
+                pp_label_set_text_if_changed(date_label, date);
+            } else if (page == PAGE_FOCUS) {
+                pp_label_set_text_fmt_if_changed(focus_label, "%02d:%02d", focus_left / 60, focus_left % 60);
+                if (!focus_left) {
+                    pp_label_set_text_if_changed(focus_state, "KONIEC SESJI");
+                    pp_label_set_text_if_changed(focus_button_text, "OD NOWA");
+                }
+            } else if (page == PAGE_PC) {
+                pc_telemetry_t snap;
+                portENTER_CRITICAL(&pc_mux);
+                snap = pc_data;
+                portEXIT_CRITICAL(&pc_mux);
+                bool pc_online = snap.last_update_us > 0 &&
+                  (esp_timer_get_time() - snap.last_update_us) < PC_TIMEOUT_MS * 1000LL;
+                if (pc_online && snap.fps >= 0) pp_label_set_text_fmt_if_changed(pc_fps, "%d FPS", snap.fps);
+                else pp_label_set_text_if_changed(pc_fps, "-- FPS");
+                pp_label_set_text_if_changed(pc_game, !pc_online ? "PC: WYMAGA NADAJNIKA" :
+                    (snap.game[0] ? snap.game : "PULSEPANEL PC"));
+                if (pc_online && snap.frame_x10 >= 0)
+                    pp_label_set_text_fmt_if_changed(pc_frametime, "FRAME: %d.%d ms", snap.frame_x10 / 10, snap.frame_x10 % 10);
+                else pp_label_set_text_if_changed(pc_frametime, "FRAME: -- ms");
+                if (pc_online && snap.low >= 0) pp_label_set_text_fmt_if_changed(pc_low, "LOW~: %d FPS", snap.low);
+                else pp_label_set_text_if_changed(pc_low, "LOW~: --");
+                if (pc_online && snap.cpu >= 0) pp_label_set_text_fmt_if_changed(pc_cpu, "CPU: %d%%", snap.cpu);
+                else pp_label_set_text_if_changed(pc_cpu, "CPU: --");
+                if (pc_online && snap.gpu >= 0) pp_label_set_text_fmt_if_changed(pc_gpu, "GPU: %d%%", snap.gpu);
+                else pp_label_set_text_if_changed(pc_gpu, "GPU: --");
+                if (pc_online && snap.ram >= 0) pp_label_set_text_fmt_if_changed(pc_ram, "RAM: %d%%", snap.ram);
+                else pp_label_set_text_if_changed(pc_ram, "RAM: --");
+                if (pc_online && (snap.cpu_temp >= 0 || snap.gpu_temp >= 0)) {
+                    char temps[80];
+                    /* Temperature values must come from sensors, never estimate. */
+                    if (snap.cpu_temp >= 0 && snap.gpu_temp >= 0)
+                        snprintf(temps, sizeof(temps), "TEMP CPU: %d C   GPU: %d C", snap.cpu_temp, snap.gpu_temp);
+                    else if (snap.cpu_temp >= 0)
+                        snprintf(temps, sizeof(temps), "TEMP CPU: %d C", snap.cpu_temp);
+                    else snprintf(temps, sizeof(temps), "TEMP GPU: %d C", snap.gpu_temp);
+                    pp_label_set_text_if_changed(pc_temps, temps);
+                } else pp_label_set_text_if_changed(pc_temps, "");
+                pp_label_set_text_if_changed(pc_state, pc_online ? "WIFI PC: ONLINE" : "PC: BRAK DANYCH");
+            } else if (page == PAGE_PRINTER) {
+                printer_snapshot_t printer;
+                printer_monitor_copy(&printer);
+                pp_label_set_text_if_changed(print_status,
+                    !printer.configured ? "DODAJ DRUKARKE" :
+                    !printer.connected ? "BAMBU / POLACZENIE" :
+                    (printer.state[0] ? printer.state : "DRUKARKA ONLINE"));
+                pp_label_set_text_if_changed(print_connect_detail,
+                    printer.connected ? "POSTEP WYDRUKU" : printer_monitor_status_text(printer.connection_state));
+                const int displayed_progress = printer.connected && printer.progress>=0 ? printer.progress : 0;
+                if (lv_arc_get_value(print_progress_arc) != displayed_progress)
+                    lv_arc_set_value(print_progress_arc, displayed_progress);
+                if (printer.connected && printer.progress >= 0)
+                    pp_label_set_text_fmt_if_changed(print_percent,"%d%%",printer.progress);
+                else pp_label_set_text_if_changed(print_percent,"--%");
+                pp_label_set_text_if_changed(print_file,printer.connected && printer.filename[0] ? printer.filename : "--");
+                if (printer.connected && printer.minutes_left>=0)
+                    pp_label_set_text_fmt_if_changed(print_time,"Pozostalo: %d min",printer.minutes_left);
+                else pp_label_set_text_if_changed(print_time,"Pozostalo: -- min");
+                if (printer.connected && printer.nozzle_x10>=0 && printer.bed_x10>=0)
+                    pp_label_set_text_fmt_if_changed(print_temps,"Dysza: %d C   Stol: %d C",printer.nozzle_x10/10,printer.bed_x10/10);
+                else pp_label_set_text_if_changed(print_temps,"Dysza: --   Stol: --");
+                if (printer.connected && printer.layer_current>=0 && printer.layer_total>=0)
+                    pp_label_set_text_fmt_if_changed(print_layers,"Warstwa: %d / %d",printer.layer_current,printer.layer_total);
+                else pp_label_set_text_if_changed(print_layers,"Warstwa: -- / --");
+                if (printer.connected && printer.tray_now>=0 && printer.tray_now<254)
+                    pp_label_set_text_fmt_if_changed(print_ams,"AMS: slot %d",printer.tray_now);
+                else pp_label_set_text_if_changed(print_ams,"AMS: --");
             }
-            pc_telemetry_t snap;
-            portENTER_CRITICAL(&pc_mux);
-            snap = pc_data;
-            portEXIT_CRITICAL(&pc_mux);
-            bool pc_online = snap.last_update_us > 0 &&
-              (esp_timer_get_time() - snap.last_update_us) < PC_TIMEOUT_MS * 1000LL;
-            if (pc_online && snap.fps >= 0) lv_label_set_text_fmt(pc_fps, "%d FPS", snap.fps);
-            else lv_label_set_text(pc_fps, "-- FPS");
-            lv_label_set_text(pc_game, !pc_online ? "PC: WYMAGA NADAJNIKA" :
-                (snap.game[0] ? snap.game : "PULSEPANEL PC"));
-            if (pc_online && snap.frame_x10 >= 0)
-                lv_label_set_text_fmt(pc_frametime, "FRAME: %d.%d ms", snap.frame_x10 / 10, snap.frame_x10 % 10);
-            else lv_label_set_text(pc_frametime, "FRAME: -- ms");
-            if (pc_online && snap.low >= 0) lv_label_set_text_fmt(pc_low, "LOW~: %d FPS", snap.low);
-            else lv_label_set_text(pc_low, "LOW~: --");
-            if (pc_online && snap.cpu >= 0) lv_label_set_text_fmt(pc_cpu, "CPU: %d%%", snap.cpu);
-            else lv_label_set_text(pc_cpu, "CPU: --");
-            if (pc_online && snap.gpu >= 0) lv_label_set_text_fmt(pc_gpu, "GPU: %d%%", snap.gpu);
-            else lv_label_set_text(pc_gpu, "GPU: --");
-            if (pc_online && snap.ram >= 0) lv_label_set_text_fmt(pc_ram, "RAM: %d%%", snap.ram);
-            else lv_label_set_text(pc_ram, "RAM: --");
-            if (pc_online && (snap.cpu_temp >= 0 || snap.gpu_temp >= 0)) {
-                char temps[80];
-                /* Temperature values must come from sensors, never estimate. */
-                if (snap.cpu_temp >= 0 && snap.gpu_temp >= 0)
-                    snprintf(temps, sizeof(temps), "TEMP CPU: %d C   GPU: %d C", snap.cpu_temp, snap.gpu_temp);
-                else if (snap.cpu_temp >= 0)
-                    snprintf(temps, sizeof(temps), "TEMP CPU: %d C", snap.cpu_temp);
-                else snprintf(temps, sizeof(temps), "TEMP GPU: %d C", snap.gpu_temp);
-                lv_label_set_text(pc_temps, temps);
-            } else lv_label_set_text(pc_temps, "");
-            lv_label_set_text(pc_state, pc_online ? "WIFI PC: ONLINE" : "PC: BRAK DANYCH");
-            printer_snapshot_t printer;
-            printer_monitor_copy(&printer);
-            lv_label_set_text(print_status,
-                !printer.configured ? "DODAJ DRUKARKE" :
-                !printer.connected ? "BAMBU / POLACZENIE" :
-                (printer.state[0] ? printer.state : "DRUKARKA ONLINE"));
-            lv_label_set_text(print_connect_detail,
-                printer.connected ? "POSTEP WYDRUKU" : printer_monitor_status_text(printer.connection_state));
-            lv_arc_set_value(print_progress_arc,
-                printer.connected && printer.progress>=0 ? printer.progress : 0);
-            if (printer.connected && printer.progress >= 0)
-                lv_label_set_text_fmt(print_percent,"%d%%",printer.progress);
-            else lv_label_set_text(print_percent,"--%");
-            lv_label_set_text(print_file,printer.connected && printer.filename[0] ? printer.filename : "--");
-            if (printer.connected && printer.minutes_left>=0)
-                lv_label_set_text_fmt(print_time,"Pozostalo: %d min",printer.minutes_left);
-            else lv_label_set_text(print_time,"Pozostalo: -- min");
-            if (printer.connected && printer.nozzle_x10>=0 && printer.bed_x10>=0)
-                lv_label_set_text_fmt(print_temps,"Dysza: %d C   Stol: %d C",printer.nozzle_x10/10,printer.bed_x10/10);
-            else lv_label_set_text(print_temps,"Dysza: --   Stol: --");
-            if (printer.connected && printer.layer_current>=0 && printer.layer_total>=0)
-                lv_label_set_text_fmt(print_layers,"Warstwa: %d / %d",printer.layer_current,printer.layer_total);
-            else lv_label_set_text(print_layers,"Warstwa: -- / --");
-            if (printer.connected && printer.tray_now>=0 && printer.tray_now<254)
-                lv_label_set_text_fmt(print_ams,"AMS: slot %d",printer.tray_now);
-            else lv_label_set_text(print_ams,"AMS: --");
             bsp_display_unlock();
         }
     }

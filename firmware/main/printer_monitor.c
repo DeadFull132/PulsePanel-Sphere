@@ -285,7 +285,9 @@ void printer_monitor_on_wifi(void) {
         .credentials.username="bblp",
         .credentials.authentication.password=s_code,
         .network.reconnect_timeout_ms=5000,
-        .buffer.size=16384,
+        /* MQTT input packets are reassembled into s_rx in PSRAM.
+         * Do not reserve 16 KiB+ of scarce internal heap for the transport. */
+        .buffer.size=4096,
         .task.stack_size=8192
     };
     s_client=esp_mqtt_client_init(&cfg);
