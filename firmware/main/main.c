@@ -910,7 +910,12 @@ static void init_network(void)
     }
     wifi_config_t cfg = {0};
     memcpy(cfg.sta.ssid, ssid, strlen(ssid));
-    snprintf((char *)cfg.sta.password, sizeof(cfg.sta.password), "%s", password);
+    /* ESP-IDF wifi_sta_config_t.password has exactly 64 bytes.
+     * A 64-digit hexadecimal PSK is valid and does not fit with a trailing NUL.
+     * The structure was zero-initialized above; copy at most the array size.
+     */
+    size_t wifi_password_len = strnlen(password, sizeof(cfg.sta.password));
+    memcpy(cfg.sta.password, password, wifi_password_len);
     cfg.sta.pmf_cfg.capable = true;
     cfg.sta.pmf_cfg.required = false;
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
