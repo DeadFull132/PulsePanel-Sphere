@@ -27,7 +27,8 @@ jobs:
         run: |
           idf.py set-target esp32s3
           idf.py build
-          idf.py merge-bin -o build/pulsepanel-sphere-full.bin -f raw
+          idf.py merge-bin -o pulsepanel-sphere-full.bin -f raw
+          test -s build/pulsepanel-sphere-full.bin
       - name: Generate validated installer manifest
         run: python3 tools/package_installer.py
       - name: Set up GitHub Pages
