@@ -123,8 +123,28 @@ static void swipe_cb(lv_event_t *event)
     if (!indev) return;
     lv_dir_t direction = lv_indev_get_gesture_dir(indev);
     if (!is_main_page(page)) return;
-    if (direction == LV_DIR_LEFT) change_page((page + 1) % (PAGE_PRINTER + 1));
-    else if (direction == LV_DIR_RIGHT) change_page((page + PAGE_PRINTER) % (PAGE_PRINTER + 1));
+    if (direction == LV_DIR_LEFT) {
+        change_page((page + 1) % (PAGE_PRINTER + 1));
+        lv_indev_wait_release(indev);
+    } else if (direction == LV_DIR_RIGHT) {
+        change_page((page + PAGE_PRINTER) % (PAGE_PRINTER + 1));
+        lv_indev_wait_release(indev);
+    }
+}
+
+/* Fallback navigation: taps work even when the user swipes too slowly
+ * for LVGL's gesture recognition threshold. These are used only on the
+ * six normal pages; printer setup screens keep their dedicated buttons. */
+static void previous_page_press(lv_event_t *event)
+{
+    (void)event;
+    if (is_main_page(page)) change_page((page + PAGE_PRINTER) % (PAGE_PRINTER + 1));
+}
+
+static void next_page_press(lv_event_t *event)
+{
+    (void)event;
+    if (is_main_page(page)) change_page((page + 1) % (PAGE_PRINTER + 1));
 }
 
 static void sound_task(void *arg)
@@ -317,6 +337,10 @@ static void create_ui(void)
         lv_obj_set_style_pad_all(pages[i], 0, 0);
         lv_obj_set_style_radius(pages[i], 0, 0);
         lv_obj_remove_flag(pages[i], LV_OBJ_FLAG_SCROLLABLE);
+        /* LVGL bubbles gestures upward by default. Stop them at this
+         * page, where swipe_cb is registered, instead of losing them
+         * on the top-level screen object (which has no swipe callback). */
+        lv_obj_remove_flag(pages[i], LV_OBJ_FLAG_GESTURE_BUBBLE);
         lv_obj_add_event_cb(pages[i], swipe_cb, LV_EVENT_GESTURE, NULL);
         label(pages[i], "PULSEPANEL", -164, 300, 0x6ed7e9, &lv_font_montserrat_28);
         if (i != PAGE_PC && i != PAGE_NETWORK && i != PAGE_PRINTER_WELCOME && i != PAGE_PRINTER_SETUP) label(pages[i], "<     PRZESUN     >", 177, 310, 0x5d758a, &lv_font_montserrat_20);
@@ -382,6 +406,16 @@ static void create_ui(void)
     label(pages[PAGE_PRINTER_SETUP], "Wpisz IP, serial i kod LAN", 36, 374, 0xc1d6df, &lv_font_montserrat_20);
     label(pages[PAGE_PRINTER_SETUP], "Masz 10 min. Ustawienia zostana zapisane.", 78, 400, 0x88a9b7, &lv_font_montserrat_20);
     pill(pages[PAGE_PRINTER_SETUP], "POWROT", 0, 143, 220, 58, printer_back_press);
+
+    /* Persistent visible touch navigation for all six main pages.
+     * Place these last so they are above the labels in hit-testing.
+     * Narrow hit regions stay inside the round 466x466 viewport. */
+    for (int i = PAGE_CLOCK; i <= PAGE_PRINTER; ++i) {
+        lv_obj_t *left = pill(pages[i], "<", -180, -5, 50, 72, previous_page_press);
+        lv_obj_t *right = pill(pages[i], ">", 180, -5, 50, 72, next_page_press);
+        lv_obj_set_style_bg_opa(left, LV_OPA_30, 0);
+        lv_obj_set_style_bg_opa(right, LV_OPA_30, 0);
+    }
     change_page(PAGE_CLOCK);
 }
 
