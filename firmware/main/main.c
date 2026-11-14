@@ -55,6 +55,7 @@ static lv_obj_t *net_status, *net_ip, *net_setup, *net_extra, *net_pair_value;
 static lv_obj_t *speaker_state;
 static lv_obj_t *print_status, *print_percent, *print_time, *print_temps, *print_layers, *print_file, *print_ams;
 static lv_obj_t *print_setup_url;
+static lv_obj_t *print_connect_detail, *print_progress_arc;
 static int printer_choice = -1;
 static int64_t printer_config_until_us = 0;
 static lv_obj_t *pc_fps, *pc_frametime, *pc_low, *pc_game, *pc_cpu, *pc_gpu, *pc_ram, *pc_temps, *pc_state;
@@ -220,10 +221,10 @@ static lv_obj_t *pill(lv_obj_t *parent, const char *text,
     lv_obj_t *btn = lv_button_create(parent);
     lv_obj_set_size(btn, w, h);
     lv_obj_align(btn, LV_ALIGN_CENTER, x, y);
-    lv_obj_set_style_bg_color(btn, lv_color_hex(0x193d4c), 0);
-    lv_obj_set_style_border_color(btn, lv_color_hex(0x69d7e9), 0);
+    lv_obj_set_style_bg_color(btn, lv_color_hex(0x205266), 0);
+    lv_obj_set_style_border_color(btn, lv_color_hex(0x66cfe1), 0);
     lv_obj_set_style_border_width(btn, 1, 0);
-    lv_obj_set_style_radius(btn, 18, 0);
+    lv_obj_set_style_radius(btn, 22, 0);
     if (cb) lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, NULL);
     label(btn, text, 0, w - 10, 0xeffcff, &lv_font_montserrat_20);
     return btn;
@@ -323,16 +324,41 @@ static void printer_back_press(lv_event_t *event)
     change_page(PAGE_PRINTER);
 }
 
+/* Premium circular AMOLED layout: common surface, dividers, page index.
+ * Draw decorations first, under labels and controls, so they never steal touch. */
+static void theme_surface(lv_obj_t *parent)
+{
+    lv_obj_t *panel = lv_obj_create(parent);
+    lv_obj_set_size(panel, 330, 280);
+    lv_obj_align(panel, LV_ALIGN_CENTER, 0, -4);
+    lv_obj_set_style_bg_color(panel, lv_color_hex(0x0d2130), 0);
+    lv_obj_set_style_border_color(panel, lv_color_hex(0x23465a), 0);
+    lv_obj_set_style_border_width(panel, 1, 0);
+    lv_obj_set_style_radius(panel, 35, 0);
+    lv_obj_set_style_pad_all(panel, 0, 0);
+    lv_obj_remove_flag(panel, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_remove_flag(panel, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_t *accent = lv_obj_create(parent);
+    lv_obj_set_size(accent, 62, 4);
+    lv_obj_align(accent, LV_ALIGN_CENTER, 0, -142);
+    lv_obj_set_style_bg_color(accent, lv_color_hex(0x73e5ee), 0);
+    lv_obj_set_style_border_width(accent, 0, 0);
+    lv_obj_set_style_radius(accent, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_pad_all(accent, 0, 0);
+    lv_obj_remove_flag(accent, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_remove_flag(accent, LV_OBJ_FLAG_CLICKABLE);
+}
+
 static void create_ui(void)
 {
     lv_obj_t *root = lv_screen_active();
-    lv_obj_set_style_bg_color(root, lv_color_hex(0x030a12), 0);
+    lv_obj_set_style_bg_color(root, lv_color_hex(0x050e18), 0);
     lv_obj_remove_flag(root, LV_OBJ_FLAG_SCROLLABLE);
     for (int i = 0; i < PAGE_COUNT; i++) {
         pages[i] = lv_obj_create(root);
         lv_obj_set_size(pages[i], 466, 466);
         lv_obj_center(pages[i]);
-        lv_obj_set_style_bg_color(pages[i], lv_color_hex(0x030a12), 0);
+        lv_obj_set_style_bg_color(pages[i], lv_color_hex(0x050e18), 0);
         lv_obj_set_style_border_width(pages[i], 0, 0);
         lv_obj_set_style_pad_all(pages[i], 0, 0);
         lv_obj_set_style_radius(pages[i], 0, 0);
@@ -342,25 +368,27 @@ static void create_ui(void)
          * on the top-level screen object (which has no swipe callback). */
         lv_obj_remove_flag(pages[i], LV_OBJ_FLAG_GESTURE_BUBBLE);
         lv_obj_add_event_cb(pages[i], swipe_cb, LV_EVENT_GESTURE, NULL);
-        label(pages[i], "PULSEPANEL", -164, 300, 0x6ed7e9, &lv_font_montserrat_28);
-        if (i != PAGE_PC && i != PAGE_NETWORK && i != PAGE_PRINTER_WELCOME && i != PAGE_PRINTER_SETUP) label(pages[i], "<     PRZESUN     >", 177, 310, 0x5d758a, &lv_font_montserrat_20);
+        theme_surface(pages[i]);
+        label(pages[i], "PULSE  /  PANEL", -178, 300, 0x73e5ee, &lv_font_montserrat_20);
+        if (i != PAGE_NETWORK && i != PAGE_PRINTER && i != PAGE_PRINTER_SETUP)
+            label(pages[i], "DOTKNIJ STRZALKI  <  >", 179, 230, 0x668899, &lv_font_montserrat_20);
     }
-    label(pages[PAGE_CLOCK], "ZEGAR / WIFI", -95, 260, 0x8bafbd, &lv_font_montserrat_20);
-    time_label = label(pages[PAGE_CLOCK], "--:--", -14, 350, 0xffffff, &lv_font_montserrat_48);
-    date_label = label(pages[PAGE_CLOCK], "Czekam na godzine", 55, 350, 0xb0c9d2, &lv_font_montserrat_20);
-    label(pages[PAGE_CLOCK], "Czas ustawi sie automatycznie po Wi-Fi", 119, 355,
-          0x7996a5, &lv_font_montserrat_20);
+    label(pages[PAGE_CLOCK], "ZEGAR  /  ONLINE", -109, 280, 0x9abcd0, &lv_font_montserrat_20);
+    time_label = label(pages[PAGE_CLOCK], "--:--", -22, 310, 0xffffff, &lv_font_montserrat_48);
+    date_label = label(pages[PAGE_CLOCK], "Czekam na godzine", 37, 310, 0x83e6ef, &lv_font_montserrat_20);
+    label(pages[PAGE_CLOCK], "SYNCHRONIZACJA PRZEZ WIFI", 99, 304,
+          0x7c9bab, &lv_font_montserrat_20);
 
-    label(pages[PAGE_PC], "GAMING / PC", -118, 340, 0x96bbc9, &lv_font_montserrat_20);
-    pc_fps = label(pages[PAGE_PC], "-- FPS", -71, 325, 0xf5ffff, &lv_font_montserrat_48);
-    pc_game = label(pages[PAGE_PC], "PC: WYMAGA NADAJNIKA", -18, 365, 0x7fd8ea, &lv_font_montserrat_20);
-    pc_frametime = label(pages[PAGE_PC], "FRAME: -- ms", 20, 360, 0x9bb7c4, &lv_font_montserrat_20);
-    pc_low = label(pages[PAGE_PC], "LOW~: --", 48, 360, 0x9bb7c4, &lv_font_montserrat_20);
-    pc_cpu = label(pages[PAGE_PC], "CPU: --", 80, 350, 0x91d7e4, &lv_font_montserrat_20);
-    pc_gpu = label(pages[PAGE_PC], "GPU: --", 108, 350, 0x91d7e4, &lv_font_montserrat_20);
-    pc_ram = label(pages[PAGE_PC], "RAM: --", 136, 350, 0x91d7e4, &lv_font_montserrat_20);
-    pc_temps = label(pages[PAGE_PC], "", 165, 345, 0xa3bdc7, &lv_font_montserrat_20);
-    pc_state = label(pages[PAGE_PC], "", 193, 370, 0x8199aa, &lv_font_montserrat_20);
+    label(pages[PAGE_PC], "GAMING  /  LIVE", -120, 290, 0x96bbc9, &lv_font_montserrat_20);
+    pc_fps = label(pages[PAGE_PC], "-- FPS", -71, 310, 0xffffff, &lv_font_montserrat_48);
+    pc_game = label(pages[PAGE_PC], "PC: WYMAGA NADAJNIKA", -23, 310, 0x75e2ee, &lv_font_montserrat_20);
+    pc_frametime = label(pages[PAGE_PC], "FRAME: -- ms", 13, 310, 0xa5becc, &lv_font_montserrat_20);
+    pc_low = label(pages[PAGE_PC], "1% LOW: --", 44, 310, 0xa5becc, &lv_font_montserrat_20);
+    pc_cpu = label(pages[PAGE_PC], "CPU: --", 78, 290, 0x91e2ec, &lv_font_montserrat_20);
+    pc_gpu = label(pages[PAGE_PC], "GPU: --", 108, 290, 0x91e2ec, &lv_font_montserrat_20);
+    pc_ram = label(pages[PAGE_PC], "RAM: --", 138, 290, 0x91e2ec, &lv_font_montserrat_20);
+    pc_temps = label(pages[PAGE_PC], "", 165, 330, 0xa3bdc7, &lv_font_montserrat_20);
+    pc_state = label(pages[PAGE_PC], "", 193, 320, 0x8199aa, &lv_font_montserrat_20);
 
     label(pages[PAGE_FOCUS], "FOCUS / POMODORO", -107, 340, 0x86adbc, &lv_font_montserrat_20);
     focus_label = label(pages[PAGE_FOCUS], "25:00", -33, 330, 0xffffff, &lv_font_montserrat_48);
@@ -390,15 +418,28 @@ static void create_ui(void)
     wifi_reset_button_label = lv_obj_get_child(reset_wifi, 0);
     lv_obj_t *reset_all = pill(pages[PAGE_NETWORK], "RESET FABRYCZNY", 0, 191, 196, 32, factory_reset_press);
     factory_reset_button_label = lv_obj_get_child(reset_all, 0);
-    label(pages[PAGE_PRINTER], "BAMBU LAB / DRUKARKA", -125, 380, 0x90b8c5, &lv_font_montserrat_20);
-    print_status = label(pages[PAGE_PRINTER], "NIE SKONFIGUROWANO", -91, 370, 0xb6dbe6, &lv_font_montserrat_20);
-    print_percent = label(pages[PAGE_PRINTER], "--%", -43, 320, 0xffffff, &lv_font_montserrat_48);
-    print_file = label(pages[PAGE_PRINTER], "--", 7, 370, 0x83dbe9, &lv_font_montserrat_20);
-    print_time = label(pages[PAGE_PRINTER], "Pozostalo: -- min", 42, 350, 0x9bbfce, &lv_font_montserrat_20);
-    print_temps = label(pages[PAGE_PRINTER], "Dysza: --   Stol: --", 76, 360, 0x91c9d7, &lv_font_montserrat_20);
-    print_layers = label(pages[PAGE_PRINTER], "Warstwa: -- / --", 107, 350, 0x9cbdc9, &lv_font_montserrat_20);
-    print_ams = label(pages[PAGE_PRINTER], "AMS: --", 137, 310, 0x85a4b1, &lv_font_montserrat_20);
-    pill(pages[PAGE_PRINTER], "DODAJ / ZMIEN", 0, 184, 250, 54, printer_change_press);
+    label(pages[PAGE_PRINTER], "BAMBU LAB  /  LIVE", -124, 310, 0x8cd3e1, &lv_font_montserrat_20);
+    print_status = label(pages[PAGE_PRINTER], "BRAK DRUKARKI", -96, 310, 0x9fe2ec, &lv_font_montserrat_20);
+    /* Decorative progress ring; not a touch control. */
+    print_progress_arc = lv_arc_create(pages[PAGE_PRINTER]);
+    lv_obj_set_size(print_progress_arc, 194, 194);
+    lv_obj_align(print_progress_arc, LV_ALIGN_CENTER, 0, -24);
+    lv_arc_set_range(print_progress_arc, 0, 100);
+    lv_arc_set_value(print_progress_arc, 0);
+    lv_obj_set_style_arc_color(print_progress_arc, lv_color_hex(0x294858), LV_PART_MAIN);
+    lv_obj_set_style_arc_color(print_progress_arc, lv_color_hex(0x75e5ed), LV_PART_INDICATOR);
+    lv_obj_set_style_arc_width(print_progress_arc, 9, LV_PART_MAIN);
+    lv_obj_set_style_arc_width(print_progress_arc, 11, LV_PART_INDICATOR);
+    lv_obj_set_style_bg_opa(print_progress_arc, LV_OPA_TRANSP, LV_PART_KNOB);
+    lv_obj_remove_flag(print_progress_arc, LV_OBJ_FLAG_CLICKABLE);
+    print_percent = label(pages[PAGE_PRINTER], "--%", -24, 220, 0xffffff, &lv_font_montserrat_48);
+    print_file = label(pages[PAGE_PRINTER], "--", 50, 310, 0x88e4ee, &lv_font_montserrat_20);
+    print_time = label(pages[PAGE_PRINTER], "Pozostalo: -- min", 78, 310, 0xbed9e4, &lv_font_montserrat_20);
+    print_temps = label(pages[PAGE_PRINTER], "Dysza: --   Stol: --", 106, 310, 0xa8c9d7, &lv_font_montserrat_20);
+    print_layers = label(pages[PAGE_PRINTER], "Warstwa: -- / --", 134, 310, 0xa8c9d7, &lv_font_montserrat_20);
+    print_ams = label(pages[PAGE_PRINTER], "AMS: --", 159, 260, 0x809fad, &lv_font_montserrat_20);
+    print_connect_detail = label(pages[PAGE_PRINTER], "", -74, 310, 0xb0ccd9, &lv_font_montserrat_20);
+    pill(pages[PAGE_PRINTER], "DODAJ / ZMIEN", 0, 198, 162, 30, printer_change_press);
 
     label(pages[PAGE_PRINTER_WELCOME], "MASZ DRUKARKE", -103, 355, 0xe2f5fa, &lv_font_montserrat_28);
     label(pages[PAGE_PRINTER_WELCOME], "BAMBU LAB?", -60, 345, 0x77dfee, &lv_font_montserrat_28);
@@ -802,6 +843,25 @@ static esp_err_t pc_metrics_http(httpd_req_t *request)
     return httpd_resp_sendstr(request, "{\"ok\":true}");
 }
 
+/* Read-only diagnostics. Never return IP, serial, access code or credentials. */
+static esp_err_t printer_status_http(httpd_req_t *req)
+{
+    if (!wifi_ready || setup) {
+        httpd_resp_send_custom_err(req, "503 Service Unavailable", "Wi-Fi offline");
+        return ESP_FAIL;
+    }
+    printer_snapshot_t snap;
+    printer_monitor_copy(&snap);
+    char body[280];
+    snprintf(body, sizeof(body),
+        "{\"configured\":%s,\"online\":%s,\"phase\":%d,\"progress\":%d}",
+        snap.configured ? "true" : "false", snap.connected ? "true" : "false",
+        (int)snap.connection_state, snap.connected ? snap.progress : -1);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    return httpd_resp_sendstr(req, body);
+}
+
 static void discovery_task(void *arg)
 {
     (void)arg;
@@ -841,12 +901,14 @@ static void start_server(void)
     httpd_uri_t config = { .uri = "/configure", .method = HTTP_POST, .handler = configure_http };
     httpd_uri_t status = { .uri = "/api/v1/status", .method = HTTP_GET, .handler = status_http };
     httpd_uri_t metrics = { .uri = "/api/v1/metrics", .method = HTTP_POST, .handler = pc_metrics_http };
+    httpd_uri_t pd = { .uri = "/api/v1/printer/status", .method = HTTP_GET, .handler = printer_status_http };
     httpd_uri_t pg = { .uri = "/printer", .method = HTTP_GET, .handler = printer_get_http };
     httpd_uri_t pp = { .uri = "/printer", .method = HTTP_POST, .handler = printer_post_http };
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &root));
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &config));
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &status));
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &metrics));
+    ESP_ERROR_CHECK(httpd_register_uri_handler(server, &pd));
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &pg));
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &pp));
     ESP_ERROR_CHECK(httpd_register_err_handler(server, HTTPD_404_NOT_FOUND, captive_http_404));
@@ -1001,6 +1063,7 @@ void app_main(void)
         ESP_LOGW(TAG, "Discovery task creation failed");
     while (true) {
         vTaskDelay(pdMS_TO_TICKS(1000));
+        printer_monitor_poll();
         time_t now;
         time(&now);
         struct tm tm;
@@ -1061,8 +1124,12 @@ void app_main(void)
             printer_monitor_copy(&printer);
             lv_label_set_text(print_status,
                 !printer.configured ? "DODAJ DRUKARKE" :
-                !printer.connected ? "DRUKARKA OFFLINE" :
-                (printer.state[0] ? printer.state : "POLACZONO"));
+                !printer.connected ? "BAMBU / POLACZENIE" :
+                (printer.state[0] ? printer.state : "DRUKARKA ONLINE"));
+            lv_label_set_text(print_connect_detail,
+                printer.connected ? "POSTEP WYDRUKU" : printer_monitor_status_text(printer.connection_state));
+            lv_arc_set_value(print_progress_arc,
+                printer.connected && printer.progress>=0 ? printer.progress : 0);
             if (printer.connected && printer.progress >= 0)
                 lv_label_set_text_fmt(print_percent,"%d%%",printer.progress);
             else lv_label_set_text(print_percent,"--%");
@@ -1077,7 +1144,7 @@ void app_main(void)
                 lv_label_set_text_fmt(print_layers,"Warstwa: %d / %d",printer.layer_current,printer.layer_total);
             else lv_label_set_text(print_layers,"Warstwa: -- / --");
             if (printer.connected && printer.tray_now>=0 && printer.tray_now<254)
-                lv_label_set_text_fmt(print_ams,"AMS - slot: %d",printer.tray_now);
+                lv_label_set_text_fmt(print_ams,"AMS: slot %d",printer.tray_now);
             else lv_label_set_text(print_ams,"AMS: --");
             bsp_display_unlock();
         }
