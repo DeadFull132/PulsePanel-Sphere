@@ -6,6 +6,7 @@
  * 15 minutes. JPG/PNG accepted if the cover fits memory limits.
  */
 #include "bambu_cloud_cover.h"
+#include "bambu_media_guard.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -25,9 +26,9 @@
 
 #define CLOUD_JSON_MAX 20000U
 #define CLOUD_JPEG_MAX (220U * 1024U)
-#define CLOUD_IMG_SIDE 160U
-#define CLOUD_PSRAM_RESERVE (2U * 1024U * 1024U)
-#define CLOUD_DMA_RESERVE (48U * 1024U)
+#define CLOUD_IMG_SIDE 128U
+#define CLOUD_PSRAM_RESERVE (768U * 1024U)
+#define CLOUD_DMA_RESERVE (40U * 1024U)
 #define CLOUD_REQUEST_INTERVAL_MS (15U * 60U * 1000U)
 #define CLOUD_MAX_TOKEN_LEN 1799U
 static const char *TAG = "PP_CLOUD_COVER";
@@ -78,9 +79,20 @@ bool pp_cloud_take(pp_cloud_frame_t *out) {
   if(valid){ *out=s_ready;memset(&s_ready,0,sizeof(s_ready)); }
   portEXIT_CRITICAL(&s_mu);return valid;
 }
-static bool mem_ok(void){
- return heap_caps_get_free_size(MALLOC_CAP_SPIRAM)>CLOUD_PSRAM_RESERVE &&
-   heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL|MALLOC_CAP_DMA)>CLOUD_DMA_RESERVE;
+/* Reserve PSRAM for UI and SPI; only fetch if a contiguous block can be
+ * allocated. A fixed 2 MiB threshold blocked small covers unnecessarily. */
+static bool mem_ok(size_t requested){
+ const size_t ps=heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+ const size_t largest=heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM);
+ const size_t dma=heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL|MALLOC_CAP_DMA);
+ bool ok=ps>CLOUD_PSRAM_RESERVE+requested+CLOUD_IMG_SIDE*CLOUD_IMG_SIDE*2U &&
+         largest>=requested && dma>=CLOUD_DMA_RESERVE;
+ if(!ok){
+   ESP_LOGW(TAG,"CLOUD memory guard: PSRAM %u kB, largest %u kB, DMA largest %u kB, request %u kB",
+     (unsigned)(ps/1024U),(unsigned)(largest/1024U),
+     (unsigned)(dma/1024U),(unsigned)(requested/1024U));
+ }
+ return ok;
 }
 static esp_err_t http_event(esp_http_client_event_t *evt){
   if(evt->event_id!=HTTP_EVENT_ON_DATA)return ESP_OK;
@@ -236,10 +248,11 @@ static bool decode_png(const uint8_t *bytes,size_t n,pp_cloud_frame_t *out)
   bool ok=false;
   uint8_t *rgb=NULL,*small=NULL;
   do {
-    if(im.width<24 || im.height<24 || im.width>768 || im.height>768)break;
+    if(im.width<24 || im.height<24 || im.width>384 || im.height>384)break;
     size_t srcbytes=(size_t)im.width*im.height*3U;
     size_t free_psram=heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
-    if(free_psram<=CLOUD_PSRAM_RESERVE || srcbytes>free_psram-CLOUD_PSRAM_RESERVE)break;
+    if(free_psram<=CLOUD_PSRAM_RESERVE+srcbytes+(CLOUD_IMG_SIDE*CLOUD_IMG_SIDE*2U))break;
+    if(heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM)<srcbytes)break;
     rgb=heap_caps_malloc(srcbytes,MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);
     if(!rgb)break;
     im.format=PNG_FORMAT_RGB;
@@ -269,13 +282,15 @@ static bool decode_png(const uint8_t *bytes,size_t n,pp_cloud_frame_t *out)
 }
 
 static void submit(pp_cloud_frame_t *incoming){
+ pp_cloud_frame_t old={0};
  portENTER_CRITICAL(&s_mu);
- pp_cloud_frame_t old=s_ready;s_ready=*incoming;
- memset(incoming,0,sizeof(*incoming));
- portEXIT_CRITICAL(&s_mu);pp_cloud_release(&old);
+ if(s_active){old=s_ready;s_ready=*incoming;memset(incoming,0,sizeof(*incoming));}
+ portEXIT_CRITICAL(&s_mu);
+ pp_cloud_release(&old);
+ pp_cloud_release(incoming); /* discard if page was closed during download */
 }
 static void fetch_cloud_cover(void){
- if(!mem_ok()){state_set(PP_CLOUD_LOW_MEMORY);return;}
+ if(!mem_ok(64U*1024U)){state_set(PP_CLOUD_LOW_MEMORY);return;}
  char serial[41]={0};
  if(!read_printer_serial(serial,sizeof(serial))){state_set(PP_CLOUD_WAIT_PRINTER);return;}
  char *token=heap_caps_calloc(1,CLOUD_MAX_TOKEN_LEN+2,MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);
@@ -309,7 +324,7 @@ static void fetch_cloud_cover(void){
  if(has_cover)snprintf(url,sizeof(url),"%s",cover->valuestring);
  cJSON_Delete(root);
  if(!has_cover){state_set(PP_CLOUD_NO_COVER);goto clean_json;}
- if(!mem_ok()){state_set(PP_CLOUD_LOW_MEMORY);goto clean_json;}
+ if(!mem_ok(CLOUD_JPEG_MAX)){state_set(PP_CLOUD_LOW_MEMORY);goto clean_json;}
  uint8_t *jpg=heap_caps_malloc(CLOUD_JPEG_MAX,MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);
  if(!jpg){state_set(PP_CLOUD_LOW_MEMORY);goto clean_json;}
  http_sink_t im={.buffer=jpg,.capacity=CLOUD_JPEG_MAX,.used=0};
@@ -322,7 +337,11 @@ static void fetch_cloud_cover(void){
  else
    decoded_ok=decode_jpeg(jpg,im.used,&decoded);
  if(!decoded_ok)state_set(PP_CLOUD_FORMAT_UNSUPPORTED);
- else {submit(&decoded);state_set(PP_CLOUD_READY);}
+ else {
+   bool active=s_active;
+   submit(&decoded);
+   if(active && s_active)state_set(PP_CLOUD_READY);
+ }
  heap_caps_free(jpg);
  clean_json:heap_caps_free(json);
  finish:memset(token,0,strlen(token));heap_caps_free(token);
@@ -337,14 +356,35 @@ static void cloud_worker(void *arg){
   if(!pp_cloud_has_token()){state_set(PP_CLOUD_NO_TOKEN);vTaskDelay(pdMS_TO_TICKS(2500));continue;}
   uint32_t now=xTaskGetTickCount()*portTICK_PERIOD_MS;
   if(!s_last_attempt || (uint32_t)(now-s_last_attempt)>CLOUD_REQUEST_INTERVAL_MS){
-    s_last_attempt=now ? now : 1;
-    fetch_cloud_cover();
+    /* A prior camera read can still be closing its TLS session after page
+     * changes. Never allocate another decoder concurrently with camera. */
+    if(pp_media_acquire(1200)) {
+      if(s_active && s_wifi) {
+        s_last_attempt=now ? now : 1;
+        fetch_cloud_cover();
+      }
+      pp_media_release();
+    }
   }
-  vTaskDelay(pdMS_TO_TICKS(1000));
+  vTaskDelay(pdMS_TO_TICKS(1200));
  }
 }
 void pp_cloud_wifi(bool enabled){s_wifi=enabled;}
-void pp_cloud_set_active(bool active){s_active=active;if(!active)state_set(PP_CLOUD_DISABLED);}
+void pp_cloud_set_active(bool active){
+  bool was=s_active;
+  pp_cloud_frame_t old={0};
+  portENTER_CRITICAL(&s_mu);
+  s_active=active;
+  if(!active) { old=s_ready;memset(&s_ready,0,sizeof(s_ready));s_state=PP_CLOUD_DISABLED; }
+  portEXIT_CRITICAL(&s_mu);
+  pp_cloud_release(&old);
+  /* A cached image was just released. Re-fetch on a later visit, but never
+   * hammer Cloud more often than once per minute after switching pages. */
+  if(active && !was && s_last_attempt){
+    uint32_t now=xTaskGetTickCount()*portTICK_PERIOD_MS;
+    if((uint32_t)(now-s_last_attempt)>60000U)s_last_attempt=0;
+  }
+}
 void pp_cloud_init(void){
  if(s_started)return;
  if(xTaskCreatePinnedToCore(cloud_worker,"pp_cloud_preview",12288,NULL,2,NULL,0)==pdPASS)

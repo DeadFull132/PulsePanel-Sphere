@@ -40,6 +40,7 @@
 #include "printer_monitor.h"
 #include "bambu_camera.h"
 #include "bambu_cloud_cover.h"
+#include "bambu_media_guard.h"
 
 
 #define PAGE_CLOCK 0
@@ -172,6 +173,7 @@ static void change_page(int dest)
 {
     if (dest < 0 || dest >= PAGE_COUNT) return;
     if (page == PAGE_CAMERA && dest != PAGE_CAMERA) clear_camera_image();
+    if (page == PAGE_COVER && dest != PAGE_COVER) clear_cover_image();
     /* Wi-Fi thread is independent; it never calls LVGL directly. */
     bambu_camera_set_enabled(dest == PAGE_CAMERA);
     pp_cloud_set_active(dest == PAGE_COVER);
@@ -1196,6 +1198,7 @@ void app_main(void)
     ESP_ERROR_CHECK(n);
     init_pairing_pin();
     printer_monitor_init();
+    pp_media_init();
     bambu_camera_init();
     pp_cloud_init();
     nvs_handle_t choice_store;
