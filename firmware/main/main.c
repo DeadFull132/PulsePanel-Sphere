@@ -37,6 +37,9 @@
 #include "esp_timer.h"
 #include "esp_heap_caps.h"
 #include "printer_monitor.h"
+#include "bambu_camera.h"
+#include "bambu_cloud_cover.h"
+
 
 #define PAGE_CLOCK 0
 #define PAGE_PC 1
@@ -44,9 +47,11 @@
 #define PAGE_SOUND 3
 #define PAGE_NETWORK 4
 #define PAGE_PRINTER 5
-#define PAGE_PRINTER_WELCOME 6
-#define PAGE_PRINTER_SETUP 7
-#define PAGE_COUNT 8
+#define PAGE_CAMERA 6
+#define PAGE_COVER 7
+#define PAGE_PRINTER_WELCOME 8
+#define PAGE_PRINTER_SETUP 9
+#define PAGE_COUNT 10
 #define UDP_DISCOVERY_PORT 38555
 #define PC_TIMEOUT_MS 5500
 #define FOCUS_DEFAULT 1500
@@ -59,6 +64,15 @@ static lv_obj_t *speaker_state;
 static lv_obj_t *print_status, *print_percent, *print_time, *print_temps, *print_layers, *print_file, *print_ams;
 static lv_obj_t *print_setup_url;
 static lv_obj_t *print_connect_detail, *print_progress_arc;
+/* Cloud JPEG cover — one RGB565 frame in PSRAM, visible only on PAGE_COVER. */
+static lv_obj_t *cover_img, *cover_status, *cover_hint;
+static pp_cloud_frame_t cover_frame = {0};
+static lv_image_dsc_t cover_desc = {0};
+/* CAM PRO: one JPEG frame at a time; network task never touches LVGL. */
+static lv_obj_t *cam_img, *cam_status, *cam_details;
+static cam_frame_t cam_display_frame = {0};
+static lv_image_dsc_t cam_display_dsc = {0};
+
 static int printer_choice = -1;
 static int64_t printer_config_until_us = 0;
 static lv_obj_t *pc_fps, *pc_frametime, *pc_low, *pc_game, *pc_cpu, *pc_gpu, *pc_ram, *pc_temps, *pc_state;
@@ -127,18 +141,39 @@ static void pp_label_set_text_fmt_if_changed(lv_obj_t *obj, const char *fmt, ...
 
 static bool is_main_page(int dest)
 {
-    return dest >= PAGE_CLOCK && dest <= PAGE_PRINTER;
+    return dest >= PAGE_CLOCK && dest <= PAGE_COVER;
 }
 
 /* Disable automatic screensaver while configuring Wi-Fi/printer. */
 static bool topo_allowed(void)
 {
-    return !setup && is_main_page(page);
+    return !setup && is_main_page(page) && page != PAGE_CAMERA;
 }
 
+/* Clear image source before releasing PSRAM. Must be called under LVGL lock. */
+static void clear_camera_image(void)
+{
+    if (!cam_img) return;
+    lv_image_set_src(cam_img, LV_SYMBOL_IMAGE);
+    lv_image_cache_drop(&cam_display_dsc);
+    bambu_camera_release(&cam_display_frame);
+    memset(&cam_display_dsc, 0, sizeof(cam_display_dsc));
+}
+static void clear_cover_image(void)
+{
+    if (!cover_img) return;
+    lv_image_set_src(cover_img, LV_SYMBOL_IMAGE);
+    lv_image_cache_drop(&cover_desc);
+    pp_cloud_release(&cover_frame);
+    memset(&cover_desc, 0, sizeof(cover_desc));
+}
 static void change_page(int dest)
 {
     if (dest < 0 || dest >= PAGE_COUNT) return;
+    if (page == PAGE_CAMERA && dest != PAGE_CAMERA) clear_camera_image();
+    /* Wi-Fi thread is independent; it never calls LVGL directly. */
+    bambu_camera_set_enabled(dest == PAGE_CAMERA);
+    pp_cloud_set_active(dest == PAGE_COVER);
     page = dest;
     for (int i = 0; i < PAGE_COUNT; i++) {
         if (i == page) lv_obj_remove_flag(pages[i], LV_OBJ_FLAG_HIDDEN);
@@ -154,10 +189,10 @@ static void swipe_cb(lv_event_t *event)
     lv_dir_t direction = lv_indev_get_gesture_dir(indev);
     if (!is_main_page(page)) return;
     if (direction == LV_DIR_LEFT) {
-        change_page((page + 1) % (PAGE_PRINTER + 1));
+        change_page((page + 1) % (PAGE_COVER + 1));
         lv_indev_wait_release(indev);
     } else if (direction == LV_DIR_RIGHT) {
-        change_page((page + PAGE_PRINTER) % (PAGE_PRINTER + 1));
+        change_page((page + PAGE_COVER) % (PAGE_COVER + 1));
         lv_indev_wait_release(indev);
     }
 }
@@ -168,13 +203,13 @@ static void swipe_cb(lv_event_t *event)
 static void previous_page_press(lv_event_t *event)
 {
     (void)event;
-    if (is_main_page(page)) change_page((page + PAGE_PRINTER) % (PAGE_PRINTER + 1));
+    if (is_main_page(page)) change_page((page + PAGE_COVER) % (PAGE_COVER + 1));
 }
 
 static void next_page_press(lv_event_t *event)
 {
     (void)event;
-    if (is_main_page(page)) change_page((page + 1) % (PAGE_PRINTER + 1));
+    if (is_main_page(page)) change_page((page + 1) % (PAGE_COVER + 1));
 }
 
 static void sound_task(void *arg)
@@ -470,6 +505,31 @@ static void create_ui(void)
     print_connect_detail = label(pages[PAGE_PRINTER], "", -74, 310, 0xb0ccd9, &lv_font_montserrat_20);
     pill(pages[PAGE_PRINTER], "DODAJ / ZMIEN", 0, 198, 162, 30, printer_change_press);
 
+    /* CAM PRO / A1 mini: turn on worker only while this page is visible. */
+    label(pages[PAGE_CAMERA], "A1 MINI / KAMERA", -141, 330, 0x85e8ef, &lv_font_montserrat_20);
+    cam_status = label(pages[PAGE_CAMERA], "DOTKNIJ KAMERE", -107, 358, 0xeafaff, &lv_font_montserrat_20);
+    cam_img = lv_image_create(pages[PAGE_CAMERA]);
+    lv_image_set_src(cam_img, LV_SYMBOL_IMAGE);
+    lv_obj_align(cam_img, LV_ALIGN_CENTER, 0, -5);
+    lv_obj_remove_flag(cam_img, LV_OBJ_FLAG_CLICKABLE);
+    cam_details = label(pages[PAGE_CAMERA], "LAN 6000 / JPEG / bez PC", 118, 360,
+                        0x95b7c7, &lv_font_montserrat_20);
+    label(pages[PAGE_CAMERA], "Odświezanie co 3 sekundy", 145, 358,
+          0x6e92a8, &lv_font_montserrat_20);
+
+    /* Cloud cover is a DIFFERENT screen from camera and print status.
+     * Keep the thumbnail 160x160 inside the circular safe area. */
+    label(pages[PAGE_COVER], "BAMBU CLOUD / OKLADKA", -137, 350, 0x8edce7, &lv_font_montserrat_20);
+    cover_img = lv_image_create(pages[PAGE_COVER]);
+    lv_image_set_src(cover_img, LV_SYMBOL_IMAGE);
+    lv_obj_align(cover_img, LV_ALIGN_CENTER, 0, -13);
+    lv_obj_remove_flag(cover_img, LV_OBJ_FLAG_CLICKABLE);
+    cover_status = label(pages[PAGE_COVER], "Czekam na miniaturke", 105, 336,
+                          0xb7d0df, &lv_font_montserrat_20);
+    cover_hint = label(pages[PAGE_COVER], "Skonfiguruj /cloud na telefonie", 140, 350,
+                        0x92b9c9, &lv_font_montserrat_20);
+    pill(pages[PAGE_COVER], "USTAW CLOUD", 0, 184, 184, 30, printer_change_press);
+
     label(pages[PAGE_PRINTER_WELCOME], "MASZ DRUKARKE", -103, 355, 0xe2f5fa, &lv_font_montserrat_28);
     label(pages[PAGE_PRINTER_WELCOME], "BAMBU LAB?", -60, 345, 0x77dfee, &lv_font_montserrat_28);
     label(pages[PAGE_PRINTER_WELCOME], "Mozesz dodac ja pozniej.", 6, 350, 0x93b2be, &lv_font_montserrat_20);
@@ -479,14 +539,14 @@ static void create_ui(void)
     label(pages[PAGE_PRINTER_SETUP], "DODAJ DRUKARKE", -111, 375, 0xb5edf4, &lv_font_montserrat_28);
     label(pages[PAGE_PRINTER_SETUP], "Na telefonie otworz:", -57, 355, 0xabc4d0, &lv_font_montserrat_20);
     print_setup_url = label(pages[PAGE_PRINTER_SETUP], "Czekam na Wi-Fi", -10, 410, 0x6ed7e9, &lv_font_montserrat_20);
-    label(pages[PAGE_PRINTER_SETUP], "Wpisz IP, serial i kod LAN", 36, 374, 0xc1d6df, &lv_font_montserrat_20);
+    label(pages[PAGE_PRINTER_SETUP], "Drukarka: /printer  Cloud: /cloud", 36, 374, 0xc1d6df, &lv_font_montserrat_20);
     label(pages[PAGE_PRINTER_SETUP], "Masz 10 min. Ustawienia zostana zapisane.", 78, 400, 0x88a9b7, &lv_font_montserrat_20);
     pill(pages[PAGE_PRINTER_SETUP], "POWROT", 0, 143, 220, 58, printer_back_press);
 
     /* Persistent visible touch navigation for all six main pages.
      * Place these last so they are above the labels in hit-testing.
      * Narrow hit regions stay inside the round 466x466 viewport. */
-    for (int i = PAGE_CLOCK; i <= PAGE_PRINTER; ++i) {
+    for (int i = PAGE_CLOCK; i <= PAGE_COVER; ++i) {
         lv_obj_t *left = pill(pages[i], "<", -180, -5, 50, 72, previous_page_press);
         lv_obj_t *right = pill(pages[i], ">", 180, -5, 50, 72, next_page_press);
         lv_obj_set_style_bg_opa(left, LV_OPA_30, 0);
@@ -687,6 +747,65 @@ static esp_err_t printer_post_http(httpd_req_t *req)
         "<p>PulsePanel uruchomi sie ponownie i sprobuje polaczyc sie automatycznie.</p>");
     xTaskCreate(restart_task,"pp_pr_restart",2048,NULL,3,NULL);
     return ESP_OK;
+}
+
+/* Local-only, time-limited cloud access token provisioning.
+ * Not production secure: the form is HTTP and token is stored in plain NVS.
+ * NEVER enter an account password here. Keep this off public networks.
+ * Use only a token you legitimately control and are permitted to use. */
+static esp_err_t cloud_get_http(httpd_req_t *req)
+{
+    if (!printer_form_allowed()) {
+        httpd_resp_send_err(req,HTTPD_403_FORBIDDEN,"Otworz konfiguracje drukarki na PulsePanel");
+        return ESP_FAIL;
+    }
+    httpd_resp_set_type(req,"text/html; charset=utf-8");
+    httpd_resp_set_hdr(req,"Cache-Control","no-store");
+    return httpd_resp_sendstr(req,
+        "<!doctype html><html lang='pl'><meta charset='utf-8'>"
+        "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+        "<title>PulsePanel Cloud — test</title>"
+        "<style>body{background:#101b28;color:white;font:16px system-ui;"
+        "max-width:500px;margin:3em auto;padding:1em}input,button{width:100%;padding:12px;"
+        "margin:10px 0;border-radius:8px}button{background:#78e0ec}</style>"
+        "<h2>Bambu Cloud — eksperymentalnie</h2>"
+        "<p>Wklej tylko własny <b>access token</b>, NIE hasło ani kod e-mail. "
+        "Bambu Cloud to niepubliczne API, więc funkcja może nie działać. "
+        "Formularz używa zwykłego HTTP; nadaje się tylko do testów w zaufanej sieci. "
+        "Token jest zapisany w niezaszyfrowanej NVS. Nie używaj w produktach do sprzedaży.</p>"
+        "<form action='/cloud' method='post'><label>Access token"
+        "<input type='password' name='token' maxlength='1799' autocomplete='off' required>"
+        "</label><button>Zapisz token</button></form>"
+        "<p>Aby wycofać dostęp, usuń token w ustawieniach lub zresetuj urządzenie.</p></html>");
+}
+static esp_err_t cloud_post_http(httpd_req_t *req)
+{
+    if (!printer_form_allowed()) {
+        httpd_resp_send_err(req,HTTPD_403_FORBIDDEN,"Konfiguracja zablokowana");
+        return ESP_FAIL;
+    }
+    if(req->content_len<45 || req->content_len>6000){
+        httpd_resp_send_err(req,HTTPD_400_BAD_REQUEST,"Nieprawidlowa dlugosc tokenu");
+        return ESP_FAIL;
+    }
+    char *body=heap_caps_calloc((size_t)req->content_len+1,1,MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);
+    char *token=heap_caps_calloc(1801,1,MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);
+    if(!body||!token){if(body)heap_caps_free(body);if(token)heap_caps_free(token);return ESP_ERR_NO_MEM;}
+    int total=0;bool success=true;
+    while(total<req->content_len){
+        int n=httpd_req_recv(req,body+total,req->content_len-total);
+        if(n==HTTPD_SOCK_ERR_TIMEOUT)continue;
+        if(n<=0){success=false;break;}
+        total+=n;
+    }
+    if(success)success=read_form(body,"token",token,1801)&&pp_cloud_set_token(token);
+    memset(token,0,1801);heap_caps_free(token);
+    memset(body,0,(size_t)req->content_len+1);heap_caps_free(body);
+    if(!success){httpd_resp_send_err(req,HTTPD_400_BAD_REQUEST,"Token niepoprawny");return ESP_FAIL;}
+    httpd_resp_set_type(req,"text/html; charset=utf-8");
+    return httpd_resp_sendstr(req,"<meta charset='utf-8'><h2>Token zapisany.</h2>"
+       "<p>Otworz na ekranie PulsePanel widok Bambu Cloud. "
+       "Nie udostepniaj kopii pamieci ESP32 innym osobom.</p>");
 }
 
 /* Simple captive portal DNS responder: in setup mode resolves A queries to 192.168.4.1.
@@ -925,6 +1044,7 @@ static void start_server(void)
     if (server) return;
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
     cfg.server_port = 80;
+    cfg.max_uri_handlers = 12;
     if (httpd_start(&server, &cfg) != ESP_OK) return;
     httpd_uri_t root = { .uri = "/", .method = HTTP_GET, .handler = root_http };
     httpd_uri_t config = { .uri = "/configure", .method = HTTP_POST, .handler = configure_http };
@@ -933,6 +1053,8 @@ static void start_server(void)
     httpd_uri_t pd = { .uri = "/api/v1/printer/status", .method = HTTP_GET, .handler = printer_status_http };
     httpd_uri_t pg = { .uri = "/printer", .method = HTTP_GET, .handler = printer_get_http };
     httpd_uri_t pp = { .uri = "/printer", .method = HTTP_POST, .handler = printer_post_http };
+    httpd_uri_t cg = { .uri = "/cloud", .method = HTTP_GET, .handler = cloud_get_http };
+    httpd_uri_t cp = { .uri = "/cloud", .method = HTTP_POST, .handler = cloud_post_http };
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &root));
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &config));
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &status));
@@ -940,6 +1062,8 @@ static void start_server(void)
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &pd));
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &pg));
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &pp));
+    ESP_ERROR_CHECK(httpd_register_uri_handler(server, &cg));
+    ESP_ERROR_CHECK(httpd_register_uri_handler(server, &cp));
     ESP_ERROR_CHECK(httpd_register_err_handler(server, HTTPD_404_NOT_FOUND, captive_http_404));
 }
 
@@ -1071,6 +1195,8 @@ void app_main(void)
     ESP_ERROR_CHECK(n);
     init_pairing_pin();
     printer_monitor_init();
+    bambu_camera_init();
+    pp_cloud_init();
     nvs_handle_t choice_store;
     if (nvs_open("pp_config",NVS_READONLY,&choice_store)==ESP_OK) {
         uint8_t choice=0;
@@ -1095,6 +1221,8 @@ void app_main(void)
     while (true) {
         vTaskDelay(pdMS_TO_TICKS(1000));
         printer_monitor_poll();
+        bambu_camera_set_wifi(wifi_ready);
+        pp_cloud_wifi(wifi_ready);
         if (++memory_log_ticks >= 15) {
             memory_log_ticks = 0;
             const size_t dma_free = heap_caps_get_free_size(MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
@@ -1195,6 +1323,50 @@ void app_main(void)
                 if (printer.connected && printer.tray_now>=0 && printer.tray_now<254)
                     pp_label_set_text_fmt_if_changed(print_ams,"AMS: slot %d",printer.tray_now);
                 else pp_label_set_text_if_changed(print_ams,"AMS: --");
+            } else if (page == PAGE_COVER) {
+                pp_cloud_frame_t new_cover = {0};
+                if (pp_cloud_take(&new_cover)) {
+                    clear_cover_image();
+                    cover_frame = new_cover;
+                    cover_desc.header.magic = LV_IMAGE_HEADER_MAGIC;
+                    cover_desc.header.cf = LV_COLOR_FORMAT_RGB565;
+                    cover_desc.header.stride = new_cover.width * 2;
+                    cover_desc.header.w = new_cover.width;
+                    cover_desc.header.h = new_cover.height;
+                    cover_desc.data = new_cover.pixels;
+                    cover_desc.data_size = new_cover.size;
+                    lv_image_set_src(cover_img, &cover_desc);
+                    lv_obj_align(cover_img, LV_ALIGN_CENTER, 0, -13);
+                }
+                pp_label_set_text_if_changed(cover_status,
+                    pp_cloud_state_text(pp_cloud_get_state()));
+                pp_label_set_text_if_changed(cover_hint,
+                    "Ostatni model z Cloud; nie zawsze aktualny");
+            } else if (page == PAGE_CAMERA) {
+                {
+                    cam_frame_t next = {0};
+                    if (bambu_camera_take(&next)) {
+                        /* Decoded RGB565 lives in PSRAM: no full-size JPEG
+                         * image allocations in LVGL's draw path. */
+                        clear_camera_image();
+                        cam_display_frame = next;
+                        cam_display_dsc.header.magic = LV_IMAGE_HEADER_MAGIC;
+                        cam_display_dsc.header.cf = LV_COLOR_FORMAT_RGB565;
+                        cam_display_dsc.header.stride = next.width * 2;
+                        cam_display_dsc.header.w = next.width;
+                        cam_display_dsc.header.h = next.height;
+                        cam_display_dsc.data = next.pixels;
+                        cam_display_dsc.data_size = next.len;
+                        lv_image_set_src(cam_img, &cam_display_dsc);
+                        lv_image_set_scale(cam_img, 256);
+                        lv_obj_align(cam_img, LV_ALIGN_CENTER, 0, -4);
+                    }
+                    pp_label_set_text_if_changed(cam_status,
+                        bambu_camera_state_text(bambu_camera_state()));
+                    pp_label_set_text_fmt_if_changed(cam_details, "DMA: %u KB  /  PSRAM: %u KB",
+                      (unsigned)(heap_caps_get_largest_free_block(MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL)/1024U),
+                      (unsigned)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)/1024U));
+                }
             }
             } /* Screensaver hides background updates */
             bsp_display_unlock();
