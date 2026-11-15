@@ -28,6 +28,7 @@
 #include "nvs.h"
 #include "bsp/esp-bsp.h"
 #include "bsp/display.h"
+#include "topo_saver.h"
 #include "lvgl.h"
 #include "esp_codec_dev.h"
 #include "cJSON.h"
@@ -127,6 +128,12 @@ static void pp_label_set_text_fmt_if_changed(lv_obj_t *obj, const char *fmt, ...
 static bool is_main_page(int dest)
 {
     return dest >= PAGE_CLOCK && dest <= PAGE_PRINTER;
+}
+
+/* Disable automatic screensaver while configuring Wi-Fi/printer. */
+static bool topo_allowed(void)
+{
+    return !setup && is_main_page(page);
 }
 
 static void change_page(int dest)
@@ -1077,6 +1084,7 @@ void app_main(void)
     (void)bsp_display_brightness_set(68);
     if (bsp_display_lock(1000) != ESP_OK) return;
     create_ui();
+    pp_topo_init(lv_screen_active(), 75, topo_allowed);
     bsp_display_unlock();
     init_network();
     if (xTaskCreate(captive_dns_task, "pp_captive_dns", 4096, NULL, 3, NULL) != pdPASS)
@@ -1116,6 +1124,7 @@ void app_main(void)
         if (bsp_display_lock(400) == ESP_OK) {
             /* Only update visible LVGL objects. Other pages refresh on first
              * visible tick, avoiding unnecessary draw buffer pressure. */
+            if (!pp_topo_active()) {
             if (page == PAGE_CLOCK) {
                 pp_label_set_text_if_changed(time_label, hour);
                 pp_label_set_text_if_changed(date_label, date);
@@ -1187,6 +1196,7 @@ void app_main(void)
                     pp_label_set_text_fmt_if_changed(print_ams,"AMS: slot %d",printer.tray_now);
                 else pp_label_set_text_if_changed(print_ams,"AMS: --");
             }
+            } /* Screensaver hides background updates */
             bsp_display_unlock();
         }
     }
