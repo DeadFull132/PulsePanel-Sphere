@@ -15,6 +15,7 @@
 #include "freertos/task.h"
 #include "freertos/portmacro.h"
 #include "nvs.h"
+#include "lwip/sockets.h"
 #include "lwip/inet.h"
 
 #define CAM_MAX_JPEG (512U * 1024U)

@@ -63,7 +63,13 @@ const char *pp_cloud_state_text(pp_cloud_state_t s) {
   }
 }
 void pp_cloud_release(pp_cloud_frame_t *f) {
-  if(!f)return; if(f->pixels)heap_caps_free(f->pixels);memset(f,0,sizeof(*f));
+  if (!f) {
+    return;
+  }
+  if (f->pixels) {
+    heap_caps_free(f->pixels);
+  }
+  memset(f, 0, sizeof(*f));
 }
 bool pp_cloud_take(pp_cloud_frame_t *out) {
   if(!out)return false;

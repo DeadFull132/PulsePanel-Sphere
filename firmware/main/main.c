@@ -30,6 +30,7 @@
 #include "bsp/display.h"
 #include "topo_saver.h"
 #include "lvgl.h"
+#include "src/misc/cache/instance/lv_image_cache.h"
 #include "esp_codec_dev.h"
 #include "cJSON.h"
 #include "lwip/sockets.h"
