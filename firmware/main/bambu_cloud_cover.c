@@ -25,10 +25,10 @@
 #include "printer_monitor.h"
 
 #define CLOUD_JSON_MAX 20000U
-#define CLOUD_JPEG_MAX (220U * 1024U)
-#define CLOUD_IMG_SIDE 128U
+#define CLOUD_JPEG_MAX (160U * 1024U)
+#define CLOUD_IMG_SIDE 96U
 #define CLOUD_PSRAM_RESERVE (768U * 1024U)
-#define CLOUD_DMA_RESERVE (40U * 1024U)
+#define CLOUD_DMA_RESERVE (24U * 1024U)
 #define CLOUD_REQUEST_INTERVAL_MS (15U * 60U * 1000U)
 #define CLOUD_MAX_TOKEN_LEN 1799U
 static const char *TAG = "PP_CLOUD_COVER";
@@ -346,19 +346,18 @@ static void fetch_cloud_cover(void){
  clean_json:heap_caps_free(json);
  finish:memset(token,0,strlen(token));heap_caps_free(token);
 }
-static void cloud_worker(void *arg){
- (void)arg;
- for(;;){
-  if(!s_active){vTaskDelay(pdMS_TO_TICKS(750));continue;}
-  if(!s_wifi){state_set(PP_CLOUD_NO_WIFI);vTaskDelay(pdMS_TO_TICKS(1500));continue;}
-  if(!printer_monitor_configured()){state_set(PP_CLOUD_WAIT_PRINTER);vTaskDelay(pdMS_TO_TICKS(2500));continue;}
-  if(time(NULL)<1704067200){state_set(PP_CLOUD_WAIT_TIME);vTaskDelay(pdMS_TO_TICKS(2500));continue;}
-  if(!pp_cloud_has_token()){state_set(PP_CLOUD_NO_TOKEN);vTaskDelay(pdMS_TO_TICKS(2500));continue;}
-  uint32_t now=xTaskGetTickCount()*portTICK_PERIOD_MS;
+/* FIX12: Called by the camera worker ONLY while camera is inactive.
+ * No independent TLS+decoder task is created. This saves its 12 KiB stack
+ * and prevents simultaneous Cloud/camera decoding even on page switches. */
+void pp_cloud_service_once(void) {
+  if(!s_started || !s_active) return;
+  if(!s_wifi){state_set(PP_CLOUD_NO_WIFI);return;}
+  if(!printer_monitor_configured()){state_set(PP_CLOUD_WAIT_PRINTER);return;}
+  if(time(NULL)<1704067200){state_set(PP_CLOUD_WAIT_TIME);return;}
+  if(!pp_cloud_has_token()){state_set(PP_CLOUD_NO_TOKEN);return;}
+  uint32_t now=(uint32_t)(xTaskGetTickCount()*portTICK_PERIOD_MS);
   if(!s_last_attempt || (uint32_t)(now-s_last_attempt)>CLOUD_REQUEST_INTERVAL_MS){
-    /* A prior camera read can still be closing its TLS session after page
-     * changes. Never allocate another decoder concurrently with camera. */
-    if(pp_media_acquire(1200)) {
+    if(pp_media_acquire(0)) {
       if(s_active && s_wifi) {
         s_last_attempt=now ? now : 1;
         fetch_cloud_cover();
@@ -366,8 +365,6 @@ static void cloud_worker(void *arg){
       pp_media_release();
     }
   }
-  vTaskDelay(pdMS_TO_TICKS(1200));
- }
 }
 void pp_cloud_wifi(bool enabled){s_wifi=enabled;}
 void pp_cloud_set_active(bool active){
@@ -386,8 +383,6 @@ void pp_cloud_set_active(bool active){
   }
 }
 void pp_cloud_init(void){
- if(s_started)return;
- if(xTaskCreatePinnedToCore(cloud_worker,"pp_cloud_preview",12288,NULL,2,NULL,0)==pdPASS)
-   s_started=true;
- else ESP_LOGE(TAG,"Cloud task creation failed");
+ /* FIX12: work runs on pp_a1_cam task; no additional stack allocation. */
+ s_started=true;
 }

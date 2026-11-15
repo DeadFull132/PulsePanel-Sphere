@@ -4,6 +4,7 @@
  */
 #include "bambu_camera.h"
 #include "bambu_media_guard.h"
+#include "bambu_cloud_cover.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -19,14 +20,14 @@
 #include "lwip/sockets.h"
 #include "lwip/inet.h"
 
-#define CAM_MAX_JPEG (384U * 1024U)
+#define CAM_MAX_JPEG (256U * 1024U)
 /* Keep enough PSRAM for LVGL, Wi-Fi and the existing UI; don't reject
  * camera solely because 3 MiB is not free. Check each actual allocation. */
 #define CAM_PSRAM_HEADROOM (768U * 1024U)
-#define CAM_MAX_WIDTH 256U
-#define CAM_MAX_HEIGHT 144U
+#define CAM_MAX_WIDTH 160U
+#define CAM_MAX_HEIGHT 96U
 #define CAM_MAX_RGB_BYTES (CAM_MAX_WIDTH * CAM_MAX_HEIGHT * 2U)
-#define CAM_MIN_DMA_LARGEST (40U * 1024U)
+#define CAM_MIN_DMA_LARGEST (24U * 1024U)
 #define CAM_FRAME_INTERVAL_US 4000000LL
 #define CAM_NET_TIMEOUT_MS 3500
 static const char *TAG = "PP_CAM";
@@ -190,8 +191,14 @@ static bool enough_memory(size_t input_bytes) {
  * The 1.0.x decoder supports scaling by integer multiples of 8. */
 static bool decode_scaled(const uint8_t *jpeg, size_t n, uint16_t src_w,
                           uint16_t src_h, cam_frame_t *out) {
-    uint32_t factor_w = CAM_MAX_WIDTH * 256U / src_w;
-    uint32_t factor_h = CAM_MAX_HEIGHT * 256U / src_h;
+    /* Two rendering qualities: reserve the largest DMA block for the LCD.
+     * This reduces PSRAM payload and prevents 73 KiB flush-copy requests.
+     * Lower mode: ~112x56 RGB565; higher: ~160x88 RGB565. */
+    const size_t dma_largest=heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL|MALLOC_CAP_DMA);
+    const uint32_t target_w=(dma_largest>=54U*1024U)?CAM_MAX_WIDTH:112U;
+    const uint32_t target_h=(dma_largest>=54U*1024U)?CAM_MAX_HEIGHT:64U;
+    uint32_t factor_w = target_w * 256U / src_w;
+    uint32_t factor_h = target_h * 256U / src_h;
     uint32_t factor = factor_w < factor_h ? factor_w : factor_h;
     if (factor > 256U) factor = 256U;
     uint16_t w = (uint16_t)(((uint32_t)src_w * factor / 256U) & ~7U);
@@ -321,7 +328,14 @@ finish:
 static void camera_task(void *arg) {
     (void)arg;
     while(true) {
-        if(!s_enabled) { vTaskDelay(pdMS_TO_TICKS(250)); continue; }
+        if(!s_enabled) {
+            /* FIX12: Camera and Cloud use one worker stack. Never spawn two
+             * independent 12 KiB TLS tasks; Cloud work is done only while
+             * the camera is inactive. */
+            pp_cloud_service_once();
+            vTaskDelay(pdMS_TO_TICKS(750));
+            continue;
+        }
         if(!s_wifi) { set_state(CAM_WAIT_WIFI); vTaskDelay(pdMS_TO_TICKS(500)); continue; }
         camera_run_connection();
         for(int i=0;i<20 && s_enabled;i++) vTaskDelay(pdMS_TO_TICKS(250));

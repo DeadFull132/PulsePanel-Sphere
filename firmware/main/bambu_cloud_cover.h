@@ -28,3 +28,6 @@ void pp_cloud_release(pp_cloud_frame_t *frame);
 bool pp_cloud_set_token(const char *token);
 bool pp_cloud_has_token(void);
 void pp_cloud_forget_token(void);
+
+/* FIX12: Cloud step called by shared camera worker when camera is idle. */
+void pp_cloud_service_once(void);

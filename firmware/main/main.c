@@ -74,6 +74,9 @@ static lv_image_dsc_t cover_desc = {0};
 static lv_obj_t *cam_img, *cam_status, *cam_details;
 static cam_frame_t cam_display_frame = {0};
 static lv_image_dsc_t cam_display_dsc = {0};
+/* Keep a memory warning visible long enough to diagnose it. */
+static int64_t cloud_dma_skip_until_us = 0;
+static int64_t cam_dma_skip_until_us = 0;
 
 static int printer_choice = -1;
 static int64_t printer_config_until_us = 0;
@@ -1330,8 +1333,18 @@ void app_main(void)
             } else if (page == PAGE_COVER) {
                 pp_cloud_frame_t new_cover = {0};
                 if (pp_cloud_take(&new_cover)) {
+                    /* SPI may need a contiguous internal DMA bounce buffer.
+                     * Reject oversized frames before LVGL attempts the flush. */
+                    size_t max_dma = heap_caps_get_largest_free_block(MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
+                    if (max_dma < new_cover.size + 12U * 1024U) {
+                        ESP_LOGW(TAG,"FIX12: skipped Cloud image (%u B); DMA largest=%u B",
+                                 (unsigned)new_cover.size,(unsigned)max_dma);
+                        pp_cloud_release(&new_cover);
+                        cloud_dma_skip_until_us = esp_timer_get_time() + 15000000LL;
+                    } else {
                     clear_cover_image();
                     cover_frame = new_cover;
+                    cloud_dma_skip_until_us = 0;
                     cover_desc.header.magic = LV_IMAGE_HEADER_MAGIC;
                     cover_desc.header.cf = LV_COLOR_FORMAT_RGB565;
                     cover_desc.header.stride = new_cover.width * 2;
@@ -1341,19 +1354,28 @@ void app_main(void)
                     cover_desc.data_size = new_cover.size;
                     lv_image_set_src(cover_img, &cover_desc);
                     lv_obj_align(cover_img, LV_ALIGN_CENTER, 0, -13);
+                    }
                 }
                 pp_label_set_text_if_changed(cover_status,
                     pp_cloud_state_text(pp_cloud_get_state()));
                 pp_label_set_text_if_changed(cover_hint,
-                    "Ostatni model z Cloud; nie zawsze aktualny");
+                    esp_timer_get_time() < cloud_dma_skip_until_us
+                    ? "POMINIETO OBRAZ: BRAK DMA" : "Miniatura Cloud moze byc nieaktualna");
             } else if (page == PAGE_CAMERA) {
                 {
                     cam_frame_t next = {0};
                     if (bambu_camera_take(&next)) {
-                        /* Decoded RGB565 lives in PSRAM: no full-size JPEG
-                         * image allocations in LVGL's draw path. */
+                        /* Refuse unsafe SPI/DMA display transfer; keep UI responsive. */
+                        size_t max_dma = heap_caps_get_largest_free_block(MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
+                        if (max_dma < next.len + 12U * 1024U) {
+                            ESP_LOGW(TAG,"FIX12: skipped camera image (%u B); DMA largest=%u B",
+                                     (unsigned)next.len,(unsigned)max_dma);
+                            bambu_camera_release(&next);
+                            cam_dma_skip_until_us = esp_timer_get_time() + 15000000LL;
+                        } else {
                         clear_camera_image();
                         cam_display_frame = next;
+                        cam_dma_skip_until_us = 0;
                         cam_display_dsc.header.magic = LV_IMAGE_HEADER_MAGIC;
                         cam_display_dsc.header.cf = LV_COLOR_FORMAT_RGB565;
                         cam_display_dsc.header.stride = next.width * 2;
@@ -1364,9 +1386,11 @@ void app_main(void)
                         lv_image_set_src(cam_img, &cam_display_dsc);
                         lv_image_set_scale(cam_img, 256);
                         lv_obj_align(cam_img, LV_ALIGN_CENTER, 0, -4);
+                        }
                     }
                     pp_label_set_text_if_changed(cam_status,
-                        bambu_camera_state_text(bambu_camera_state()));
+                        esp_timer_get_time() < cam_dma_skip_until_us
+                        ? "OBRAZ POMINIETY: BRAK DMA" : bambu_camera_state_text(bambu_camera_state()));
                     pp_label_set_text_fmt_if_changed(cam_details, "DMA: %u KB  /  PSRAM: %u KB",
                       (unsigned)(heap_caps_get_largest_free_block(MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL)/1024U),
                       (unsigned)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)/1024U));
